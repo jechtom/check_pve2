@@ -92,6 +92,8 @@ class CheckPVE:
             {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand cpu --nodename pve1 --warning 65 --critical 85
             {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand cluster --nodename pve1
             {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand storage --nodename pve1 --warning 70 --critical 80 --ignore-disk vm-backup
+            {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand lxc --nodename pve1 --warning 80 --critical 90 --ignore-lxc-id 101 --ignore-lxc-id 108
+            {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand qemu --nodename pve1 --warning 80 --critical 90 --ignore-qemu-id 200
             with api password:
             {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_password mypassword --subcommand storage --nodename pve1 --ignore-disk disk1 --ignore-disk disk2 --warning 80 --critical 85"""))
 
@@ -112,8 +114,7 @@ class CheckPVE:
                                         choices=(
                                             'ceph', 'ceph_io', 'cluster', 'cpu', 'disks_health', 'lxc', 'memory', 'pveversion', 'qemu', 'services', 'storage', 'swap'),
                                         required=True,
-                                        help="Select subcommand to use. Some subcommands need warning and critical arguments. \
-                                            Disks, lxc and qemu subcommands need warning and critical thresholds.")
+                                        help="Select subcommand to use. cpu, memory, swap, storage, disks_health, lxc and qemu need warning and critical thresholds.")
         
         check_pve_opt.add_argument('--nodename', type=str, required=True, help="node name")
         
@@ -133,16 +134,16 @@ class CheckPVE:
                                         help='Check disks in health check by disk name, --disk-name disk1 --disk-name disk2 ...etc', default=[])
         
         check_pve_opt.add_argument('--ceph-io-warning', dest='ceph_io_warning', type=int,
-                                help='IO read/write warning threshold for cheph-io checking. Default: 10000 operations/sec', default=10000)
+                                help='IO read/write warning threshold for ceph-io checking. Default: 10000 operations/sec', default=10000)
         
         check_pve_opt.add_argument('--ceph-byte-warning', dest='ceph_byte_warning', type=int,
-                                help='Byte read/write warning threshold for cheph-io checking. Default: 200MB/sec', default=200)
+                                help='Byte read/write warning threshold for ceph-io checking. Default: 200MB/sec', default=200)
 
         check_pve_opt.add_argument('--warning', dest='threshold_warning', type=int,
-                                help='Warning threshold for check value. Mutiple thresholds with name:value,name:value')
+                                help='Warning threshold in percent for cpu, memory, swap, storage, disks_health, lxc and qemu checks')
         
         check_pve_opt.add_argument('--critical', dest='threshold_critical', type=int,
-                                help='Critical threshold for check value. Mutiple thresholds with name:value,name:value')
+                                help='Critical threshold in percent for cpu, memory, swap, storage, disks_health, lxc and qemu checks')
 
         self.options = parser.parse_args()
 
