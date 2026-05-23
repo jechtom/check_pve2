@@ -25,6 +25,8 @@
 # ---------------------------------------------------------------
 #
 # changelog:
+# 2026.05.23. v2.0   - disk wearout is reversed to match proxmox UI and make more sense (0=no wearout, 100=full wearout)
+#                    - fix output and add verbosity for disks_health output (include wearout details when OK)
 # 2024.06.03. v1.25  - PVE8 - Ignore the syslog service based on the deprecation in Debian 12.5
 # 2024.04.01. v1.24  - Add ceph-io subcommand
 # 2022.12.13. v1.23  - Add help
@@ -117,6 +119,9 @@ class CheckPVE:
         check_pve_opt.add_argument('--ignore-disk', dest='ignore_disks', action='append', metavar='DISKNAME',
                                         help='Ignore disks in health check, --ignore-disk disk1 --ignore-disk disk2 ...etc', default=[])
 
+        check_pve_opt.add_argument('--ignore-service', dest='ignore_services', action='append', metavar='SVCNAME',
+                                        help='Ignore services in services health check, --ignore-service corosync --ignore_service xyz ...etc', default=[])
+
         check_pve_opt.add_argument('--disk-name', dest='include_disks', action='append', metavar='DISKNAME',
                                         help='Check disks in health check by disk name, --disk-name disk1 --disk-name disk2 ...etc', default=[])
         
@@ -140,11 +145,8 @@ class CheckPVE:
             
             parser.error(f"--warning and --critical arguments are required for '{self.options.subcommand}' subcommand!")
             
-        if self.check_thresholds_scale("increase") == False:
+        if self.check_thresholds_scale() == False:
             parser.error(f"--warning threshold must be lower then --critical threshold for '{self.options.subcommand}' subcommand!")
-        elif self.check_thresholds_scale("decrease") == False:
-            parser.error(f"--warning threshold must be higher then --critical threshold for '{self.options.subcommand}' subcommand!")
-
 
 
     def main(self):
@@ -188,6 +190,7 @@ class CheckPVE:
     @staticmethod
     def output(state, message):
         prefix = state.name
+
         message = '{} - {}'.format(prefix, message)
 
         print(message)
@@ -237,14 +240,9 @@ class CheckPVE:
         return used_number, total_number, my_unit
 
 
-
-    def check_thresholds_scale(self, scale):
-        if (self.options.subcommand == "cpu" or self.options.subcommand == "memory" or self.options.subcommand == "storage" or self.options.subcommand == "swap") and scale == "increase":
+    def check_thresholds_scale(self):
+        if (self.options.subcommand == "cpu" or self.options.subcommand == "memory" or self.options.subcommand == "storage" or self.options.subcommand == "swap" or self.options.subcommand == "disks_health"):
             return(self.options.threshold_warning < self.options.threshold_critical)
-               
-        elif self.options.subcommand == "disks_health" and scale == "decrease": 
-            return(self.options.threshold_critical < self.options.threshold_warning)
-
 
 
     def check_ceph(self, perfdata, subcommand):
@@ -330,26 +328,23 @@ class CheckPVE:
 
     def check_disks_health(self, request_output, subcommand):
         for disk in request_output:
-            disk_vendor = (disk["vendor"]).strip()
+            disk_serial = disk["serial"]
             disk_model = disk["model"]
             disk_type = disk["type"]
             disk_devpath = disk["devpath"]
             disk_health = disk["health"]
-            disk_wearout = disk["wearout"]
-            
+            disk_wearout = 100 - disk["wearout"] # in API we got 0 for maximum wearout and 100 for none; reverse it to match proxmox UI and to make more sense
+            disk_name_with_details = f"{disk_model} ({disk_type}, SN: {disk_serial}) on {disk_devpath}"
+
             if disk_health != "OK" and disk_health != "PASSED" and disk_health != "UNKNOWN":
-                self.result_list.append(f"WARNING - {disk_vendor} - {disk_model} type: {disk_type} on {disk_devpath} is failed: {disk_health}")
-            elif isinstance(disk_wearout, int) and disk_wearout <= self.options.threshold_warning and disk_wearout >= self.options.threshold_critical:
-                self.result_list.append(f"WARNING - {disk_vendor} - {disk_model} type: {disk_type} on {disk_devpath} has low wearout: {disk_wearout}")
-            elif isinstance(disk_wearout, int) and disk_wearout <= self.options.threshold_critical:
-                self.result_list.append(f"CRITICAL - {disk_vendor} - {disk_model} type: {disk_type} on {disk_devpath} has low wearout: {disk_wearout}")
+                self.result_list.append(f"CRITICAL - {disk_name_with_details} has failed: {disk_health}")
+            elif isinstance(disk_wearout, int) and disk_wearout >= self.options.threshold_critical:
+                self.result_list.append(f"CRITICAL - {disk_name_with_details} has high wearout {disk_wearout}%")
+            elif isinstance(disk_wearout, int) and disk_wearout >= self.options.threshold_warning:
+                self.result_list.append(f"WARNING - {disk_name_with_details} has high wearout {disk_wearout}%")
             else:
-                if not any("WARNING" in x for x in self.result_list) or not any("CRITICAL" in x for x in self.result_list):
-                    self.result_list.append(f"OK - All disks are healthy.")
-
-            if any("WARNING" in x for x in self.result_list):
-                self.result_list = [x for x in self.result_list if re.search("WARNING -", x) if re.search("CRITICAL -", x)]
-
+                self.result_list.append(f"OK - {disk_name_with_details} has low wearout {disk_wearout}%")
+	
         self.result_list = set(self.result_list)
 
 
@@ -392,20 +387,18 @@ class CheckPVE:
             service_unit_state = (element["unit-state"])
             service_state = (element["state"])
             service_active_state = (element["active-state"])
+            service_name_with_details = f"{service_name} in state {service_state} ({service_unit_state}, {service_active_state})"
 
-
-            if (service_state != "running" or service_active_state != "active") and service_unit_state != "not-found":
-                self.result_list.append(f"WARNING - {service_desc} ({service_name}) is {service_state}.")
+            if service_name in self.options.ignore_services:
+                self.result_list.append(f"OK - {service_name_with_details}. State is ignored.")
+            elif service_unit_state == "not-found":
+                self.result_list.append(f"OK - {service_name_with_details}. Ignored as in state not-found.")
+            elif (service_state == "running" or service_active_state == "active"):
+                self.result_list.append(f"OK - {service_name_with_details}.")
             else:
-                if not any("WARNING" in x for x in self.result_list):
-                    self.result_list.append(f"OK - All services are running.")
-
-            if any("WARNING" in x for x in self.result_list):
-                self.result_list = [x for x in self.result_list if re.search("WARNING -", x)]
+                self.result_list.append(f"WARNING - {service_name_with_details}.")
 
         self.result_list = set(self.result_list)
-
-
 
     def check_storage(self, request_output, subcommand):
         
