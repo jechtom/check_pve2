@@ -4,7 +4,7 @@
 # COREX Proxmox VE check plugin for Icinga 2
 # Copyright (C) 2019-2024  Gabor Borsos <bg@corex.bg>
 # 
-# v1.25 built on 2024.06.03.
+# v2.0 built on 2026.05.23.
 # usage: check_pve2.py --help
 #
 # For bugs and feature requests mailto bg@corex.bg
@@ -27,6 +27,7 @@
 # changelog:
 # 2026.05.23. v2.0   - disk wearout is reversed to match proxmox UI and make more sense (0=no wearout, 100=full wearout)
 #                    - fix output and add verbosity for disks_health output (include wearout details when OK)
+#                    - add per-guest status checks for LXC and QEMU
 # 2024.06.03. v1.25  - PVE8 - Ignore the syslog service based on the deprecation in Debian 12.5
 # 2024.04.01. v1.24  - Add ceph-io subcommand
 # 2022.12.13. v1.23  - Add help
@@ -105,14 +106,14 @@ class CheckPVE:
                               help="Don't verify HTTPS certificate")
 
 
-        check_pve_opt = parser.add_argument_group('check arguments', 'ceph, ceph_io, cluster, cpu, disks_health, memory, pveversion, services, storage, swap')
+        check_pve_opt = parser.add_argument_group('check arguments', 'ceph, ceph_io, cluster, cpu, disks_health, lxc, memory, pveversion, qemu, services, storage, swap')
         
         check_pve_opt.add_argument("--subcommand",
                                         choices=(
-                                            'ceph', 'ceph_io', 'cluster', 'cpu', 'disks_health', 'memory', 'pveversion', 'services', 'storage', 'swap'),
+                                            'ceph', 'ceph_io', 'cluster', 'cpu', 'disks_health', 'lxc', 'memory', 'pveversion', 'qemu', 'services', 'storage', 'swap'),
                                         required=True,
                                         help="Select subcommand to use. Some subcommands need warning and critical arguments. \
-                                            Disk subcommand needs warning and critical to check wearout state.")
+                                            Disks, lxc and qemu subcommands need warning and critical thresholds.")
         
         check_pve_opt.add_argument('--nodename', type=str, required=True, help="node name")
         
@@ -121,6 +122,12 @@ class CheckPVE:
 
         check_pve_opt.add_argument('--ignore-service', dest='ignore_services', action='append', metavar='SVCNAME',
                                         help='Ignore services in services health check, --ignore-service corosync --ignore_service xyz ...etc', default=[])
+
+        check_pve_opt.add_argument('--ignore-lxc-id', dest='ignore_lxc_ids', action='append', metavar='VMID', type=int,
+                        help='Ignore LXC by VMID in lxc check, --ignore-lxc-id 101 --ignore-lxc-id 102 ...etc', default=[])
+
+        check_pve_opt.add_argument('--ignore-qemu-id', dest='ignore_qemu_ids', action='append', metavar='VMID', type=int,
+                        help='Ignore QEMU by VMID in qemu check, --ignore-qemu-id 201 --ignore-qemu-id 202 ...etc', default=[])
 
         check_pve_opt.add_argument('--disk-name', dest='include_disks', action='append', metavar='DISKNAME',
                                         help='Check disks in health check by disk name, --disk-name disk1 --disk-name disk2 ...etc', default=[])
@@ -139,8 +146,9 @@ class CheckPVE:
 
         self.options = parser.parse_args()
 
-        if (self.options.subcommand == "cpu" or self.options.subcommand == "disks_health" or self.options.subcommand == "memory" or \
-            self.options.subcommand == "storage" or self.options.subcommand == "swap") and \
+        if (self.options.subcommand == "cpu" or self.options.subcommand == "disks_health" or self.options.subcommand == "lxc" or \
+            self.options.subcommand == "memory" or self.options.subcommand == "qemu" or self.options.subcommand == "storage" or \
+            self.options.subcommand == "swap") and \
             (self.options.threshold_warning is None or self.options.threshold_critical is None):
             
             parser.error(f"--warning and --critical arguments are required for '{self.options.subcommand}' subcommand!")
@@ -173,6 +181,10 @@ class CheckPVE:
             return self.API_URL.format(hostname=self.options.api_host, port=self.options.api_port, command=f"nodes/{self.options.nodename}/storage")
         elif apiurl == "services":
             return self.API_URL.format(hostname=self.options.api_host, port=self.options.api_port, command=f"nodes/{self.options.nodename}/services")
+        elif apiurl == "lxc":
+            return self.API_URL.format(hostname=self.options.api_host, port=self.options.api_port, command=f"nodes/{self.options.nodename}/lxc")
+        elif apiurl == "qemu":
+            return self.API_URL.format(hostname=self.options.api_host, port=self.options.api_port, command=f"nodes/{self.options.nodename}/qemu")
         else:
             return self.API_URL.format(hostname=self.options.api_host, port=self.options.api_port, command=apiurl)
 
@@ -241,7 +253,9 @@ class CheckPVE:
 
 
     def check_thresholds_scale(self):
-        if (self.options.subcommand == "cpu" or self.options.subcommand == "memory" or self.options.subcommand == "storage" or self.options.subcommand == "swap" or self.options.subcommand == "disks_health"):
+        if (self.options.subcommand == "cpu" or self.options.subcommand == "disks_health" or self.options.subcommand == "lxc" or \
+            self.options.subcommand == "memory" or self.options.subcommand == "qemu" or self.options.subcommand == "storage" or \
+            self.options.subcommand == "swap"):
             return(self.options.threshold_warning < self.options.threshold_critical)
 
 
@@ -335,15 +349,18 @@ class CheckPVE:
             disk_health = disk["health"]
             disk_wearout = 100 - disk["wearout"] # in API we got 0 for maximum wearout and 100 for none; reverse it to match proxmox UI and to make more sense
             disk_name_with_details = f"{disk_model} ({disk_type}, SN: {disk_serial}) on {disk_devpath}"
+            disk_perf_name = re.sub(r"[^A-Za-z0-9_]+", "_", f"disk_{disk_devpath}").strip("_").lower()
+            wearout_perf_value = disk_wearout if isinstance(disk_wearout, (int, float)) else "U"
+            perfdata = f"|'{disk_perf_name}_wearout'={wearout_perf_value}%;{self.options.threshold_warning};{self.options.threshold_critical};0;100"
 
             if disk_health != "OK" and disk_health != "PASSED" and disk_health != "UNKNOWN":
-                self.result_list.append(f"CRITICAL - {disk_name_with_details} has failed: {disk_health}")
+                self.result_list.append(f"CRITICAL - {disk_name_with_details} has failed: {disk_health}. {perfdata}")
             elif isinstance(disk_wearout, int) and disk_wearout >= self.options.threshold_critical:
-                self.result_list.append(f"CRITICAL - {disk_name_with_details} has high wearout {disk_wearout}%")
+                self.result_list.append(f"CRITICAL - {disk_name_with_details} has high wearout {disk_wearout}%. {perfdata}")
             elif isinstance(disk_wearout, int) and disk_wearout >= self.options.threshold_warning:
-                self.result_list.append(f"WARNING - {disk_name_with_details} has high wearout {disk_wearout}%")
+                self.result_list.append(f"WARNING - {disk_name_with_details} has high wearout {disk_wearout}%. {perfdata}")
             else:
-                self.result_list.append(f"OK - {disk_name_with_details} has low wearout {disk_wearout}%")
+                self.result_list.append(f"OK - {disk_name_with_details} has low wearout {disk_wearout}%. {perfdata}")
 	
         self.result_list = set(self.result_list)
 
@@ -399,6 +416,73 @@ class CheckPVE:
                 self.result_list.append(f"WARNING - {service_name_with_details}.")
 
         self.result_list = set(self.result_list)
+
+
+    def check_lxc(self, request_output, subcommand):
+        self.check_guests(request_output, "lxc", self.options.ignore_lxc_ids)
+
+
+    def check_qemu(self, request_output, subcommand):
+        self.check_guests(request_output, "qemu", self.options.ignore_qemu_ids)
+
+
+    def check_guests(self, request_output, guest_type, ignore_vmid_list):
+        for guest in request_output:
+            vmid = guest.get("vmid", "unknown")
+            vmid_int = None
+            try:
+                vmid_int = int(vmid)
+            except (TypeError, ValueError):
+                vmid_int = None
+
+            guest_name = guest.get("name", f"{guest_type}-{vmid}")
+            guest_status = guest.get("status", guest.get("qmpstatus", "unknown"))
+            guest_cpus = guest.get("cpus", 0)
+            guest_uptime = guest.get("uptime", 0)
+
+            if vmid_int is not None and vmid_int in ignore_vmid_list:
+                self.result_list.append(f"OK - {guest_type.upper()} {guest_name} (vmid: {vmid}) is ignored.")
+                continue
+
+            cpu_raw = guest.get("cpu", 0)
+            cpu_percent = round((cpu_raw * 100), 2)
+
+            mem_used = guest.get("mem", 0)
+            mem_total = guest.get("maxmem", 0)
+            swap_used = guest.get("swap", 0)
+            swap_total = guest.get("maxswap", 0)
+            disk_used = guest.get("disk", 0)
+            disk_total = guest.get("maxdisk", 0)
+
+            mem_percent = round((mem_used / mem_total) * 100, 2) if mem_total else 0
+            swap_percent = round((swap_used / swap_total) * 100, 2) if swap_total else 0
+            disk_percent = round((disk_used / disk_total) * 100, 2) if disk_total else 0
+
+            guest_label = f"{guest_type}_{vmid}"
+            perfdata = f"|'{guest_label}_cpu'={cpu_percent}%;0;100;0;100 " \
+                       f"'{guest_label}_mem'={mem_percent}%;{self.options.threshold_warning};{self.options.threshold_critical};0;100 " \
+                       f"'{guest_label}_swap'={swap_percent}%;{self.options.threshold_warning};{self.options.threshold_critical};0;100 " \
+                       f"'{guest_label}_disk'={disk_percent}%;{self.options.threshold_warning};{self.options.threshold_critical};0;100"
+
+            base_message = f"{guest_type.upper()} {guest_name} (vmid: {vmid}) is {guest_status} " \
+                           f"(cpu: {cpu_percent}%, mem: {mem_percent}%, swap: {swap_percent}%, disk: {disk_percent}%, cpus: {guest_cpus}, uptime: {guest_uptime}s)"
+
+            threshold_values = {
+                "memory": mem_percent,
+                "swap": swap_percent,
+                "disk": disk_percent,
+            }
+            critical_metrics = [name for name, value in threshold_values.items() if value >= self.options.threshold_critical]
+            warning_metrics = [name for name, value in threshold_values.items() if self.options.threshold_warning <= value < self.options.threshold_critical]
+
+            if guest_status != "running":
+                self.result_list.append(f"CRITICAL - {base_message}. {perfdata}")
+            elif len(critical_metrics) > 0:
+                self.result_list.append(f"CRITICAL - {base_message}; exceeded critical threshold on: {', '.join(critical_metrics)}. {perfdata}")
+            elif len(warning_metrics) > 0:
+                self.result_list.append(f"WARNING - {base_message}; exceeded warning threshold on: {', '.join(warning_metrics)}. {perfdata}")
+            else:
+                self.result_list.append(f"OK - {base_message}. {perfdata}")
 
     def check_storage(self, request_output, subcommand):
         
