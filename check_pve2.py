@@ -122,7 +122,7 @@ class CheckPVE:
                                         help='Ignore disks in health check, --ignore-disk disk1 --ignore-disk disk2 ...etc', default=[])
 
         check_pve_opt.add_argument('--ignore-service', dest='ignore_services', action='append', metavar='SVCNAME',
-                                        help='Ignore services in services health check, --ignore-service corosync --ignore_service xyz ...etc', default=[])
+                                        help='Ignore services in services health check, --ignore-service corosync --ignore-service xyz ...etc', default=[])
 
         check_pve_opt.add_argument('--ignore-lxc-id', dest='ignore_lxc_ids', action='append', metavar='VMID', type=int,
                         help='Ignore LXC by VMID in lxc check, --ignore-lxc-id 101 --ignore-lxc-id 102 ...etc', default=[])
@@ -411,7 +411,7 @@ class CheckPVE:
                 self.result_list.append(f"OK - {service_name_with_details}. State is ignored.")
             elif service_unit_state == "not-found":
                 self.result_list.append(f"OK - {service_name_with_details}. Ignored as in state not-found.")
-            elif (service_state == "running" or service_active_state == "active"):
+            elif service_state == "running" and service_active_state == "active":
                 self.result_list.append(f"OK - {service_name_with_details}.")
             else:
                 self.result_list.append(f"WARNING - {service_name_with_details}.")
