@@ -41,17 +41,22 @@ OK - corexcluster cluster is working well.
 </code></pre>
 
 <pre><code>
-# cd /usr/lib/nagios/plugins
 # ./check_pve2.py --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand lxc --nodename pve1 --warning 80 --critical 90 --ignore-lxc-id 101 --ignore-lxc-id 108
 OK - LXC prom (vmid: 101) is ignored.
 WARNING - LXC webserver (vmid: 103) is running (cpu: 3.1%, mem: 84.22%, swap: 0.0%, disk: 61.17%, cpus: 2, uptime: 2526251s); exceeded warning threshold on: memory. |'lxc_103_cpu'=3.1%;0;100;0;100 'lxc_103_mem'=84.22%;80;90;0;100 'lxc_103_swap'=0.0%;80;90;0;100 'lxc_103_disk'=61.17%;80;90;0;100
 
 </code></pre>
-
 <pre><code>
 # cd /usr/lib/nagios/plugins
 # ./check_pve2.py --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand qemu --nodename pve1 --warning 80 --critical 90 --ignore-qemu-id 200
 OK - QEMU vm-router (vmid: 201) is running (cpu: 5.49%, mem: 41.63%, swap: 12.4%, disk: 54.09%, cpus: 2, uptime: 864000s). |'qemu_201_cpu'=5.49%;0;100;0;100 'qemu_201_mem'=41.63%;80;90;0;100 'qemu_201_swap'=12.4%;80;90;0;100 'qemu_201_disk'=54.09%;80;90;0;100
+
+</code></pre>
+
+<pre><code>
+# cd /usr/lib/nagios/plugins
+# ./check_pve2.py --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand backup --nodename pve1 --warning 7 --critical 14
+OK - Latest backup task vzdump:... ended with status OK; last backup succeeded; last successful backup is 2.13 days old. |'backup_age_days'=2.13;7;14;0;
 
 </code></pre>
 
@@ -70,6 +75,7 @@ OK - QEMU vm-router (vmid: 201) is running (cpu: 5.49%, mem: 41.63%, swap: 12.4%
   - add per-guest status checks for LXC and QEMU
   - add warning/critical threshold evaluation on LXC/QEMU memory, swap and disk
   - add ignore options by guest VMID for LXC and QEMU checks
+  - add backup check for latest vzdump task status and backup age thresholds
 - 2024.06.03. v1.25  - PVE8 - Ignore the syslog service based on the deprecation in Debian 12.5
 - 2024.04.01. v1.24  - Add ceph-io subcommand
 - 2022.12.13. v1.23  - Add help

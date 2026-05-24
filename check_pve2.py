@@ -28,6 +28,7 @@
 # 2026.05.23. v2.0   - disk wearout is reversed to match proxmox UI and make more sense (0=no wearout, 100=full wearout)
 #                    - fix output and add verbosity for disks_health output (include wearout details when OK)
 #                    - add per-guest status checks for LXC and QEMU
+#                    - add backup check for latest vzdump task status and backup age thresholds
 # 2024.06.03. v1.25  - PVE8 - Ignore the syslog service based on the deprecation in Debian 12.5
 # 2024.04.01. v1.24  - Add ceph-io subcommand
 # 2022.12.13. v1.23  - Add help
@@ -94,6 +95,7 @@ class CheckPVE:
             {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand storage --nodename pve1 --warning 70 --critical 80 --ignore-disk vm-backup
             {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand lxc --nodename pve1 --warning 80 --critical 90 --ignore-lxc-id 101 --ignore-lxc-id 108
             {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand qemu --nodename pve1 --warning 80 --critical 90 --ignore-qemu-id 200
+            {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_token A12fhaDFCjn92aKt=123f922a-e10b-12z7-e133-Aa3476b866ar --subcommand backup --nodename pve1 --warning 7 --critical 14
             with api password:
             {self.pluginname} --hostname pve.mydomain.com --api_user monitoring@pve --api_password mypassword --subcommand storage --nodename pve1 --ignore-disk disk1 --ignore-disk disk2 --warning 80 --critical 85"""))
 
@@ -108,13 +110,13 @@ class CheckPVE:
                               help="Don't verify HTTPS certificate")
 
 
-        check_pve_opt = parser.add_argument_group('check arguments', 'ceph, ceph_io, cluster, cpu, disks_health, lxc, memory, pveversion, qemu, services, storage, swap')
+        check_pve_opt = parser.add_argument_group('check arguments', 'backup, ceph, ceph_io, cluster, cpu, disks_health, lxc, memory, pveversion, qemu, services, storage, swap')
         
         check_pve_opt.add_argument("--subcommand",
                                         choices=(
-                                            'ceph', 'ceph_io', 'cluster', 'cpu', 'disks_health', 'lxc', 'memory', 'pveversion', 'qemu', 'services', 'storage', 'swap'),
+                                            'backup', 'ceph', 'ceph_io', 'cluster', 'cpu', 'disks_health', 'lxc', 'memory', 'pveversion', 'qemu', 'services', 'storage', 'swap'),
                                         required=True,
-                                        help="Select subcommand to use. cpu, memory, swap, storage, disks_health, lxc and qemu need warning and critical thresholds.")
+                                        help="Select subcommand to use. cpu, memory, swap, storage, disks_health, lxc, qemu and backup need warning and critical thresholds.")
         
         check_pve_opt.add_argument('--nodename', type=str, required=True, help="node name")
         
@@ -140,16 +142,16 @@ class CheckPVE:
                                 help='Byte read/write warning threshold for ceph-io checking. Default: 200MB/sec', default=200)
 
         check_pve_opt.add_argument('--warning', dest='threshold_warning', type=int,
-                                help='Warning threshold in percent for cpu, memory, swap, storage, disks_health, lxc and qemu checks')
+                                help='Warning threshold for cpu, memory, swap, storage, disks_health, lxc, qemu and backup checks (percent or days)')
         
         check_pve_opt.add_argument('--critical', dest='threshold_critical', type=int,
-                                help='Critical threshold in percent for cpu, memory, swap, storage, disks_health, lxc and qemu checks')
+                                help='Critical threshold for cpu, memory, swap, storage, disks_health, lxc, qemu and backup checks (percent or days)')
 
         self.options = parser.parse_args()
 
-        if (self.options.subcommand == "cpu" or self.options.subcommand == "disks_health" or self.options.subcommand == "lxc" or \
-            self.options.subcommand == "memory" or self.options.subcommand == "qemu" or self.options.subcommand == "storage" or \
-            self.options.subcommand == "swap") and \
+        if (self.options.subcommand == "backup" or self.options.subcommand == "cpu" or self.options.subcommand == "disks_health" or \
+            self.options.subcommand == "lxc" or self.options.subcommand == "memory" or self.options.subcommand == "qemu" or \
+            self.options.subcommand == "storage" or self.options.subcommand == "swap") and \
             (self.options.threshold_warning is None or self.options.threshold_critical is None):
             
             parser.error(f"--warning and --critical arguments are required for '{self.options.subcommand}' subcommand!")
@@ -172,6 +174,8 @@ class CheckPVE:
             return self.API_URL.format(hostname=self.options.api_host, port=self.options.api_port, command=f"nodes/{self.options.nodename}/status")
         elif apiurl == "disks_health":
             return self.API_URL.format(hostname=self.options.api_host, port=self.options.api_port, command=f"nodes/{self.options.nodename}/disks/list")
+        elif apiurl == "backup":
+            return self.API_URL.format(hostname=self.options.api_host, port=self.options.api_port, command=f"nodes/{self.options.nodename}/tasks")
         elif apiurl == "ceph":
             return self.API_URL.format(hostname=self.options.api_host, port=self.options.api_port, command="cluster/ceph/status")
         elif apiurl == "ceph_io":
@@ -254,9 +258,9 @@ class CheckPVE:
 
 
     def check_thresholds_scale(self):
-        if (self.options.subcommand == "cpu" or self.options.subcommand == "disks_health" or self.options.subcommand == "lxc" or \
-            self.options.subcommand == "memory" or self.options.subcommand == "qemu" or self.options.subcommand == "storage" or \
-            self.options.subcommand == "swap"):
+        if (self.options.subcommand == "backup" or self.options.subcommand == "cpu" or self.options.subcommand == "disks_health" or \
+            self.options.subcommand == "lxc" or self.options.subcommand == "memory" or self.options.subcommand == "qemu" or \
+            self.options.subcommand == "storage" or self.options.subcommand == "swap"):
             return(self.options.threshold_warning < self.options.threshold_critical)
 
 
@@ -285,7 +289,6 @@ class CheckPVE:
         else:
             self.result_list.append(f"OK - {message}")
 
-    
         message = f"CEPH IO byte usage is {read_bytes_sec} MB read / {write_bytes_sec} MB write per seconds.\
         |'ceph byte read per sec'={read_bytes_sec};{ceph_byte_warning};;0; 'ceph byte write per sec'={write_bytes_sec};{ceph_byte_warning};;0;"
         
@@ -293,6 +296,62 @@ class CheckPVE:
             self.result_list.append(f"WARNING - {message}")
         else:
             self.result_list.append(f"OK - {message}")
+
+
+    def check_backup(self, request_output, subcommand):
+        backup_tasks = [task for task in request_output if task.get("type") == "vzdump"]
+
+        if len(backup_tasks) == 0:
+            self.output(CheckState.WARNING, "No backup tasks found for this node.")
+
+        def task_started_at(task):
+            try:
+                return int(task.get("starttime", 0))
+            except (TypeError, ValueError):
+                return 0
+
+        latest_task = max(backup_tasks, key=task_started_at)
+        successful_tasks = [task for task in backup_tasks if str(task.get("status", "")).upper() == "OK"]
+        latest_successful_task = max(successful_tasks, key=task_started_at) if len(successful_tasks) > 0 else None
+
+        latest_task_status = str(latest_task.get("status", "unknown")).upper()
+        latest_task_text = latest_task.get("id", latest_task.get("upid", "unknown backup task"))
+        message_parts = [f"Latest backup task {latest_task_text} ended with status {latest_task_status}"]
+
+        if latest_task_status != "OK":
+            failure_state = CheckState.WARNING
+            message_parts.append("last backup failed")
+        else:
+            failure_state = CheckState.OK
+            message_parts.append("last backup succeeded")
+
+        if latest_successful_task is None:
+            age_state = CheckState.WARNING
+            age_days = None
+            message_parts.append("no successful backup was found")
+        else:
+            try:
+                latest_successful_start = int(latest_successful_task.get("starttime", 0))
+            except (TypeError, ValueError):
+                latest_successful_start = 0
+
+            age_days = round((datetime.now() - datetime.fromtimestamp(latest_successful_start)).total_seconds() / 86400, 2)
+            if age_days >= self.options.threshold_critical:
+                age_state = CheckState.CRITICAL
+            elif age_days >= self.options.threshold_warning:
+                age_state = CheckState.WARNING
+            else:
+                age_state = CheckState.OK
+
+            message_parts.append(f"last successful backup is {age_days} days old")
+
+        final_state = failure_state
+        if age_state.value > final_state.value:
+            final_state = age_state
+
+        perfdata_age = age_days if age_days is not None else "U"
+        perfdata = f"|'backup_age_days'={perfdata_age};{self.options.threshold_warning};{self.options.threshold_critical};0;"
+        self.result_list.append(f"{final_state.name} - {'; '.join(message_parts)}. {perfdata}")
         
 
 
