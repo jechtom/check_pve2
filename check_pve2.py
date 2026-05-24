@@ -38,7 +38,7 @@
 # 2022.10.23. v1.0  - First release
 # ---------------------------------------------------------------
 
-import re, sys
+import re, sys, math
 
 try:
     from enum import Enum
@@ -348,17 +348,32 @@ class CheckPVE:
             disk_type = disk["type"]
             disk_devpath = disk["devpath"]
             disk_health = disk["health"]
-            disk_wearout = 100 - disk["wearout"] # in API we got 0 for maximum wearout and 100 for none; reverse it to match proxmox UI and to make more sense
+            disk_wearout_raw = disk.get("wearout")
+            disk_wearout_value = None
+
+            try:
+                parsed_wearout = float(disk_wearout_raw)
+                if math.isfinite(parsed_wearout):
+                    disk_wearout_value = parsed_wearout
+            except (TypeError, ValueError):
+                pass
+
+            if disk_wearout_value is None:
+                # disk wearout value if not available - set it to 0 to avoid false warning/critical alerts
+                disk_wearout = 0
+            else:
+                # in API we got 0 for maximum wearout and 100 for none; reverse it to match proxmox UI and to make more sense
+                disk_wearout = round(100 - disk_wearout_value, 2)
+
             disk_name_with_details = f"{disk_model} ({disk_type}, SN: {disk_serial}) on {disk_devpath}"
             disk_perf_name = re.sub(r"[^A-Za-z0-9_]+", "_", f"disk_{disk_devpath}").strip("_").lower()
-            wearout_perf_value = disk_wearout if isinstance(disk_wearout, (int, float)) else "U"
-            perfdata = f"|'{disk_perf_name}_wearout'={wearout_perf_value}%;{self.options.threshold_warning};{self.options.threshold_critical};0;100"
+            perfdata = f"|'{disk_perf_name}_wearout'={disk_wearout}%;{self.options.threshold_warning};{self.options.threshold_critical};0;100"
 
             if disk_health != "OK" and disk_health != "PASSED" and disk_health != "UNKNOWN":
                 self.result_list.append(f"CRITICAL - {disk_name_with_details} has failed: {disk_health}. {perfdata}")
-            elif isinstance(disk_wearout, int) and disk_wearout >= self.options.threshold_critical:
+            elif isinstance(disk_wearout, (int, float)) and disk_wearout >= self.options.threshold_critical:
                 self.result_list.append(f"CRITICAL - {disk_name_with_details} has high wearout {disk_wearout}%. {perfdata}")
-            elif isinstance(disk_wearout, int) and disk_wearout >= self.options.threshold_warning:
+            elif isinstance(disk_wearout, (int, float)) and disk_wearout >= self.options.threshold_warning:
                 self.result_list.append(f"WARNING - {disk_name_with_details} has high wearout {disk_wearout}%. {perfdata}")
             else:
                 self.result_list.append(f"OK - {disk_name_with_details} has low wearout {disk_wearout}%. {perfdata}")
